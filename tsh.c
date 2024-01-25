@@ -165,7 +165,38 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
-    return;
+    char *argv[MAXARGS];
+    int bg ;
+    pid_t pid ;
+    sigset_t mask;
+    sigaddset(&mask, SIGCHLD);
+    bg = parseline(cmdline,argv);
+    if(!builtin_cmd(argv)){
+        sigemptyset(&mask);
+        setpgid(0,0);
+        if((pid = fork())== 0){
+            sigprocmask(SIG_BLOCK, &mask,NULL);
+            if(execve(argv[0],argv,environ) < 0){
+                printf("%s: Command not found.\n", argv[0]);
+                exit(0);
+            }
+        }
+        else {
+            if(!bg){
+                addjob(jobs, pid, FG, cmdline);
+            }
+            else {
+                addjob(jobs, pid, BG, cmdline);
+            }
+            sigprocmask(SIG_UNBLOCK, &mask, NULL);
+            if(!bg){
+                waitfg(pid);
+            }
+            else {
+                printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+            }
+        }
+    }
 }
 
 /* 
@@ -231,6 +262,20 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if(strcmp(argv[0], "quit") == 0){
+        exit(0);
+    }
+    else if(strcmp(argv[0],"jobs") == 0){
+        listjobs(jobs);
+        return 1;
+    }
+    else if(strcmp(argv[0],"&") == 0){
+            return 1;
+    }
+    else if(strcmp(argv[0],"fg") == 0 || strcmp(argv[0],"bg") == 0 ){
+            do_bgfg(jobs);
+            return 1;
+    }
     return 0;     /* not a builtin command */
 }
 
@@ -239,7 +284,39 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    struct job_t *jobp=NULL;
+    if (argv[1] == NULL) {
+    printf("%s command requires PID or %%jobid argument\n", argv[0]);
     return;
+  }
+  if(isdigit(argv[1][0])){
+    pid_t pid = atoi(argv[1]);
+    if(jobp != getjobpid(jobs,pid)){
+        printf("(%d): No such process\n", pid);
+      return;
+    }
+  }
+  else if(argv[1][0] == '%'){
+     int jid = atoi(&argv[1][1]);
+    if (!(jobp = getjobjid(jobs, jid))) {
+      printf("%s: No such job\n", argv[1]);
+      return;
+    }
+  }
+  else {
+    printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+    return;
+  }
+  if(strcmp(argv[0],"bg") == 0){
+    jobp->state = BG;
+    kill(-jobp->pid,SIGCONT);
+    printf("[%d] (%d) %s", jobp->jid, jobp->pid, jobp->cmdline);
+  }
+  else {
+    jobp->state = FG; 
+  	kill(-jobp->pid, SIGCONT); 
+  	waitfg(jobp->pid);
+  }
 }
 
 /* 
@@ -247,7 +324,10 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-    return;
+    while(pid == fgpid(jobs)){
+        sleep(.1);
+    }
+    return ;
 }
 
 /*****************
@@ -263,6 +343,25 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    int status ;
+    pid_t pid
+    while((pid = waitpid(fgpid(jobs),&status, WNOHANG|WUNTRACED))> 0){
+        if(WIFSTOPPED(status)){
+            getjobpid(jobs, pid)->state = ST;
+            int jid = pid2jid(pid);
+            printf("Job [%d] (%d) Stopped by signal %d\n", jid, pid, WSTOPSIG(status));
+        }
+        else if (WIFSIGNALED(status)){
+            //delete is signaled
+            int jid = pid2jid(pid);  
+            printf("Job [%d] (%d) terminated by signal %d\n", jid, pid, WTERMSIG(status));
+            deletejob(jobs, pid);
+        }  
+        else if (WIFEXITED(status)){  
+            //exited
+            deletejob(jobs, pid);  
+        }  
+    }  
     return;
 }
 
@@ -273,6 +372,10 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+    pid_t pid = fgpid(jobs);
+    if(pid > 0){
+        kill(-pid,sig);
+    }
     return;
 }
 
@@ -283,6 +386,10 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    pid_t pid = fgpid(jobs);
+    if(pid > 0){
+        kill(-pid,sig);
+    }
     return;
 }
 
